@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1085609374086",
+    "project_id": "vertup-6a66b",
+    "storage_bucket": "vertup-6a66b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1085609374086:android:0d11ae2d0153807199bc07",
+        "android_client_info": {
+          "package_name": "com.example.govnolda"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCBWR3neYTBGSbSqrZSj3lLL9xYly-0WtM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
