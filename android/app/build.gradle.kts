@@ -24,12 +24,15 @@ android {
         versionName = flutter.versionName
     }
 
+    // ТУТ БЫЛА ОШИБКА: закрывали блок android раньше времени или забывали закрыть его в конце
     buildTypes {
         release {
+            isMinifyEnabled = false  // Меняем true на false
+            isShrinkResources = false // Меняем true на false
             signingConfig = signingConfigs.getByName("debug")
         }
     }
-}
+} // Вот эта скобка закрывает блок android
 
 kotlin {
     compilerOptions {

@@ -1,10 +1,11 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; // Добавили для копирования ссылки в буфер
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -20,7 +21,10 @@ void main() async {
   );
 }
 
-// --- PROVIDER НАСТРОЕК (ПЕРЕВОД И ТЕМЫ) ---
+const List<String> availableAvatars = [
+  '🥷', '🚀', '👾', '🦊', '🐱', '🦾', '🐼', '🧙‍♂️', '🧛', '👑', '🌌', '⚡'
+];
+
 class SettingsProvider extends ChangeNotifier {
   String _currentTheme = 'dark_cyber';
   String _currentLanguage = 'ru';
@@ -123,7 +127,16 @@ class VertUpApp extends StatelessWidget {
           if (snapshot.hasData) {
             return const VertUpHome();
           }
-          return const AuthScreen();
+          return Scaffold(
+            body: Center(
+              child: ElevatedButton(
+                onPressed: () async {
+                  await FirebaseAuth.instance.signInAnonymously();
+                },
+                child: const Text("Войти анонимно (Тест)"),
+              ),
+            ),
+          );
         },
       ),
     );
@@ -175,8 +188,8 @@ class UserProfile {
   factory UserProfile.fromFirestore(Map<String, dynamic> data, String id) {
     return UserProfile(
       uid: id,
-      username: data['username'] ?? 'Anonymous NPC',
-      avatarAsset: data['avatarAsset'] ?? 'default',
+      username: data['username'] ?? 'Игрок',
+      avatarAsset: data['avatarAsset'] ?? '🥷',
       title: data['title'] ?? 'Новичок',
       xp: data['xp'] ?? 0,
       streak: data['streak'] ?? 0,
@@ -205,7 +218,7 @@ class QuestController extends ChangeNotifier {
   List<Quest> _customQuests = [];
 
   String _username = 'Игрок';
-  String _avatarAsset = 'default';
+  String _avatarAsset = '🥷';
   String _profileTitle = 'Разрушитель реальности';
 
   final List<Quest> normalQuests = const [
@@ -252,7 +265,7 @@ class QuestController extends ChangeNotifier {
       id: 'hard_02',
       titleRu: 'Абсурдный режим героя',
       titleEn: 'Absurd Hero Mode',
-      descriptionRu: 'Сними 30-секундное видео о том, почему сегодняшний день не будет NPC-днем.',
+      descriptionRu: 'Снимы 30-секундное видео о том, почему сегодняшний день не будет NPC-днем.',
       descriptionEn: 'Record a 30-second video about why today will not be an NPC day.',
       xpReward: 40,
       isHardcore: true,
@@ -315,7 +328,7 @@ class QuestController extends ChangeNotifier {
     _streak = _prefs?.getInt('streak') ?? 0;
     _lastCompletedDate = _prefs?.getString('lastCompletedDate');
     _username = _prefs?.getString('username') ?? 'Игрок';
-    _avatarAsset = _prefs?.getString('avatarAsset') ?? 'default';
+    _avatarAsset = _prefs?.getString('avatarAsset') ?? '🥷';
     _profileTitle = _prefs?.getString('profileTitle') ?? 'Выживший';
 
     _loadCustomQuests();
@@ -329,7 +342,14 @@ class QuestController extends ChangeNotifier {
       _streak = 0;
     }
 
-    if (_prefs?.getString('statusDate') == today) {
+    if (_lastCompletedDate == today) {
+      _questRevealed = true;
+      _questCompleted = true;
+      _panicUsed = _prefs?.getBool('panicUsed') ?? false;
+      _hardcoreQuestId = _prefs?.getString('hardcoreQuestId');
+      _completedQuestTextRu = _prefs?.getString('completedQuestTextRu');
+      _completedQuestTextEn = _prefs?.getString('completedQuestTextEn');
+    } else if (_prefs?.getString('statusDate') == today) {
       _questRevealed = _prefs?.getBool('questRevealed') ?? false;
       _questCompleted = _prefs?.getBool('questCompleted') ?? false;
       _panicUsed = _prefs?.getBool('panicUsed') ?? false;
@@ -495,7 +515,31 @@ class QuestController extends ChangeNotifier {
   String _dateKey(DateTime date) => '${date.year}-${date.month}-${date.day}';
 }
 
-// --- ГЛАВНЫЙ ЭКРАН ---
+class AvatarWidget extends StatelessWidget {
+  final String asset;
+  final double radius;
+  final double fontSize;
+
+  const AvatarWidget({
+    super.key, 
+    required this.asset, 
+    this.radius = 50, 
+    this.fontSize = 48,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isFile = asset.contains('/') || asset.contains('\\');
+
+    return CircleAvatar(
+      radius: radius,
+      backgroundColor: Theme.of(context).colorScheme.primary.withOpacity(0.2),
+      backgroundImage: isFile ? FileImage(File(asset)) : null,
+      child: isFile ? null : Text(asset, style: TextStyle(fontSize: fontSize)),
+    );
+  }
+}
+
 class VertUpHome extends StatefulWidget {
   const VertUpHome({super.key});
 
@@ -556,7 +600,6 @@ class _VertUpHomeState extends State<VertUpHome> {
   }
 }
 
-// --- ВКЛАДКА КВЕСТОВ ---
 class QuestTab extends StatelessWidget {
   const QuestTab({super.key});
 
@@ -614,27 +657,30 @@ class QuestTab extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 20),
-          AnimatedSwitcher(
-            duration: const Duration(milliseconds: 300),
-            child: controller.questRevealed ? const _QuestFace() : const _QuestBack(),
-          ),
-          const SizedBox(height: 20),
-          const _QuestActions(),
           
-          // --- НАДПИСЬ О ЧЕСТНОСТИ (НОВОЕ!) ---
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 500),
+            switchInCurve: Curves.easeOutBack,
+            switchOutCurve: Curves.easeIn,
+            transitionBuilder: (Widget child, Animation<double> animation) {
+              return ScaleTransition(
+                scale: animation,
+                child: FadeTransition(opacity: animation, child: child),
+              );
+            },
+            child: controller.questRevealed 
+                ? const _QuestFace(key: ValueKey('Face')) 
+                : const _QuestBack(key: ValueKey('Back')),
+          ),
+          
+          const SizedBox(height: 20),
+          _QuestActions(),
+          
           const SizedBox(height: 24),
           Text(
-            settings.translate(
-              'Приложение верит в вашу честность... 🎭', 
-              'The app believes in your honesty... 🎭'
-            ),
+            settings.translate('Приложение верит в вашу честность... 🎭', 'The app believes in your honesty... 🎭'),
             textAlign: TextAlign.center,
-            style: const TextStyle(
-              fontSize: 13, 
-              color: Colors.white30, 
-              fontStyle: FontStyle.italic,
-              letterSpacing: 0.2,
-            ),
+            style: const TextStyle(fontSize: 13, color: Colors.white30, fontStyle: FontStyle.italic),
           ),
         ],
       ),
@@ -643,7 +689,7 @@ class QuestTab extends StatelessWidget {
 }
 
 class _QuestBack extends StatelessWidget {
-  const _QuestBack();
+  const _QuestBack({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -655,12 +701,23 @@ class _QuestBack extends StatelessWidget {
       height: 240,
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(24),
-        gradient: const LinearGradient(colors: [Color(0xFF1E2A24), Color(0xFF141A29)]),
+        gradient: const LinearGradient(
+          colors: [Color(0xFF1E2A24), Color(0xFF141A29)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
       ),
       child: Center(
-        child: ElevatedButton(
-          onPressed: controller.revealQuest,
-          child: Text(settings.translate('Открыть квест', 'Reveal Quest')),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.lock_open_rounded, size: 48, color: Theme.of(context).colorScheme.primary.withOpacity(0.5)),
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: controller.revealQuest,
+              child: Text(settings.translate('Открыть квест', 'Reveal Quest')),
+            ),
+          ],
         ),
       ),
     );
@@ -668,7 +725,7 @@ class _QuestBack extends StatelessWidget {
 }
 
 class _QuestFace extends StatelessWidget {
-  const _QuestFace();
+  const _QuestFace({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -678,21 +735,31 @@ class _QuestFace extends StatelessWidget {
 
     return Container(
       padding: const EdgeInsets.all(24),
+      constraints: const BoxConstraints(minHeight: 240),
       decoration: BoxDecoration(
         color: Theme.of(context).cardTheme.color, 
         borderRadius: BorderRadius.circular(24), 
-        border: Border.all(color: Colors.white10),
+        border: Border.all(
+          color: quest.isHardcore ? Colors.redAccent.withOpacity(0.3) : Theme.of(context).colorScheme.primary.withOpacity(0.3),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Text(
-            quest.isHardcore ? settings.translate('🔥 ХАРДКОР', '🔥 HARDCORE') : settings.translate('🎲 КВЕСТ ДНЯ', '🎲 QUEST OF THE DAY'),
-            style: TextStyle(fontWeight: FontWeight.bold, color: quest.isHardcore ? Colors.redAccent : Theme.of(context).colorScheme.primary),
+          Row(
+            children: [
+              Icon(quest.isHardcore ? Icons.bolt_rounded : Icons.star_rounded, color: quest.isHardcore ? Colors.redAccent : Theme.of(context).colorScheme.primary),
+              const SizedBox(width: 8),
+              Text(
+                quest.isHardcore ? settings.translate('🔥 ХАРДКОР', '🔥 HARDCORE') : settings.translate('🎲 КВЕСТ ДНЯ', '🎲 QUEST OF THE DAY'),
+                style: TextStyle(fontWeight: FontWeight.bold, color: quest.isHardcore ? Colors.redAccent : Theme.of(context).colorScheme.primary),
+              ),
+            ],
           ),
-          const SizedBox(height: 12),
-          Text(quest.getTitle(settings.currentLanguage), style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 8),
+          const SizedBox(height: 14),
+          Text(quest.getTitle(settings.currentLanguage), style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 10),
           Text(quest.getDescription(settings.currentLanguage), style: const TextStyle(fontSize: 16, color: Colors.white70)),
         ],
       ),
@@ -733,7 +800,9 @@ class _QuestActions extends StatelessWidget {
         const SizedBox(height: 8),
         OutlinedButton(
           onPressed: controller.panicUsed ? null : controller.usePanicButton,
-          child: Text(controller.panicUsed ? settings.translate('Паника активирована', 'Panic Active') : settings.translate('Мне слабо (Паника)', 'I Chicken Out (Panic)')),
+          child: Text(controller.panicUsed 
+              ? settings.translate('Паника активирована', 'Panic Active') 
+              : settings.translate('Мне слабо (Паника)', 'I Chicken Out (Panic)')),
         ),
       ],
     );
@@ -754,485 +823,267 @@ class _CreateQuestTabState extends State<CreateQuestTab> {
   int _selectedXp = 20;
 
   @override
-  void dispose() {
-    _titleController.dispose();
-    _descController.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     final settings = context.watch<SettingsProvider>();
     final controller = context.watch<QuestController>();
 
-    return ListView(
+    return Padding(
       padding: const EdgeInsets.all(20),
-      children: [
-        Text(
-          settings.translate('Крафт Квестов', 'Quest Crafting'),
-          style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w900, letterSpacing: -1),
-        ),
-        const SizedBox(height: 16),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              children: [
-                TextField(
-                  controller: _titleController,
-                  decoration: InputDecoration(
-                    labelText: settings.translate('Название квеста', 'Quest Title'),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _descController,
-                  maxLines: 3,
-                  decoration: InputDecoration(
-                    labelText: settings.translate('Что нужно сделать?', 'Description'),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(settings.translate('Награда:', 'Reward:'), style: const TextStyle(fontWeight: FontWeight.bold)),
-                    DropdownButton<int>(
-                      value: _selectedXp,
-                      items: [20, 30, 40, 50].map((xp) => DropdownMenuItem(value: xp, child: Text('$xp XP'))).toList(),
-                      onChanged: (val) => setState(() => _selectedXp = val ?? 20),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                FilledButton(
-                  onPressed: () {
-                    if (_titleController.text.isNotEmpty && _descController.text.isNotEmpty) {
-                      controller.addCustomQuest(_titleController.text, _descController.text, _selectedXp);
-                      _titleController.clear();
-                      _descController.clear();
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(settings.translate('Квест добавлен!', 'Quest added!'))));
-                    }
-                  },
-                  child: Text(settings.translate('Создать квест', 'Create Quest')),
-                )
-              ],
-            ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(settings.translate('🛠️ Крафт квестов', '🛠️ Quest Crafting'), style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _titleController,
+            decoration: InputDecoration(labelText: settings.translate('Название квеста', 'Quest Title'), border: OutlineInputBorder(borderRadius: BorderRadius.circular(16))),
           ),
-        ),
-        const SizedBox(height: 20),
-        Text(
-          settings.translate('Твои кастомные квесты:', 'Your Custom Quests:'),
-          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 10),
-        if (controller.customQuests.isEmpty)
-          Text(settings.translate('Пул пуст.', 'Pool is empty.')),
-        ...controller.customQuests.map((q) => Card(
-          margin: const EdgeInsets.only(bottom: 8),
-          child: ListTile(
-            title: Text(q.titleRu),
-            subtitle: Text('${q.descriptionRu} (${q.xpReward} XP)'),
-            trailing: IconButton(
-              icon: const Icon(Icons.delete, color: Colors.redAccent),
-              onPressed: () => controller.deleteCustomQuest(q.id),
-            ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _descController,
+            decoration: InputDecoration(labelText: settings.translate('Описание', 'Description'), border: OutlineInputBorder(borderRadius: BorderRadius.circular(16))),
           ),
-        )),
-      ],
+          const SizedBox(height: 12),
+          DropdownButtonFormField<int>(
+            value: _selectedXp,
+            decoration: InputDecoration(labelText: settings.translate('Награда XP', 'XP Reward'), border: OutlineInputBorder(borderRadius: BorderRadius.circular(16))),
+            items: [10, 20, 30, 50].map((xp) => DropdownMenuItem(value: xp, child: Text('$xp XP'))).toList(),
+            onChanged: (val) => setState(() => _selectedXp = val ?? 20),
+          ),
+          const SizedBox(height: 16),
+          FilledButton(
+            onPressed: () {
+              if (_titleController.text.isNotEmpty && _descController.text.isNotEmpty) {
+                controller.addCustomQuest(_titleController.text, _descController.text, _selectedXp);
+                _titleController.clear();
+                _descController.clear();
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(settings.translate('Квест скрафчен!', 'Quest crafted!'))));
+              }
+            },
+            child: Text(settings.translate('Создать квест', 'Create Quest')),
+          ),
+          const Divider(height: 32),
+          Expanded(
+            child: controller.customQuests.isEmpty
+                ? Center(child: Text(settings.translate('Нет кастомных квестов', 'No custom quests yet'), style: const TextStyle(color: Colors.white30)))
+                : ListView.builder(
+                    itemCount: controller.customQuests.length,
+                    itemBuilder: (context, idx) {
+                      final q = controller.customQuests[idx];
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        child: ListTile(
+                          title: Text(q.titleRu),
+                          subtitle: Text('${q.descriptionRu} (${q.xpReward} XP)'),
+                          trailing: IconButton(icon: const Icon(Icons.delete, color: Colors.redAccent), onPressed: () => controller.deleteCustomQuest(q.id)),
+                        ),
+                      );
+                    },
+                  ),
+          )
+        ],
+      ),
     );
   }
 }
 
-// --- ВКЛАДКА ЛИДЕРОВ ---
+// --- ВКЛАДКА ЛИДЕРБОРДА (ИСПРАВЛЕННАЯ) ---
 class LeadersTab extends StatelessWidget {
   const LeadersTab({super.key});
 
   @override
   Widget build(BuildContext context) {
-    final controller = context.watch<QuestController>();
     final settings = context.watch<SettingsProvider>();
+    final controller = context.watch<QuestController>();
 
-    if (!controller.isOnline) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(20.0),
-          child: Text(
-            settings.translate('Войдите в аккаунт, чтобы увидеть таблицу лидеров.', 'Sign in to view the leaderboard.'),
-            textAlign: TextAlign.center,
-          ),
-        ),
-      );
-    }
-
-    return StreamBuilder<List<UserProfile>>(
-      stream: controller.onlineLeaderboard,
-      builder: (context, snapshot) {
-        if (snapshot.hasError) return Center(child: Text('Ошибка: ${snapshot.error}'));
-        if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
-
-        final board = snapshot.data ?? [];
-        if (board.isEmpty) return Center(child: Text(settings.translate('Таблица лидеров пуста', 'Leaderboard is empty')));
-
-        return ListView.builder(
-          padding: const EdgeInsets.all(20),
-          itemCount: board.length,
-          itemBuilder: (context, index) {
-            final player = board[index];
-            final bool isCurrentUser = player.uid == FirebaseAuth.instance.currentUser?.uid;
-
-            return Card(
-              margin: const EdgeInsets.only(bottom: 10),
-              color: isCurrentUser ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.1) : null,
-              child: ListTile(
-                leading: CircleAvatar(
-                  backgroundColor: isCurrentUser ? Theme.of(context).colorScheme.primary : null,
-                  child: Text('${index + 1}', style: TextStyle(color: isCurrentUser ? Colors.black : null)),
-                ),
-                title: Text(player.username, style: TextStyle(fontWeight: isCurrentUser ? FontWeight.bold : FontWeight.normal)),
-                subtitle: Text('🔥 Серия: ${player.streak} | ${player.title}'),
-                trailing: Text('${player.xp} XP', style: const TextStyle(fontWeight: FontWeight.bold)),
-              ),
-            );
-          },
-        );
-      },
+    return Padding(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(settings.translate('🏆 Зал славы', '🏆 Leaderboard'), style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 16),
+          Expanded(
+            child: StreamBuilder<List<UserProfile>>(
+              stream: controller.onlineLeaderboard,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+                if (!snapshot.hasData || snapshot.data!.isEmpty) return Center(child: Text(settings.translate('Таблица пуста', 'Leaderboard is empty')));
+                
+                final list = snapshot.data!;
+                return ListView.builder(
+                  itemCount: list.length,
+                  itemBuilder: (context, idx) {
+                    final user = list[idx];
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      child: ListTile(
+                        // Используем твой AvatarWidget вместо обычного Text, 
+                        // чтобы он корректно читал пути к файлам картинок!
+                        leading: AvatarWidget(
+                          asset: user.avatarAsset, 
+                          radius: 20, 
+                          fontSize: 18,
+                        ),
+                        title: Text(user.username, style: const TextStyle(fontWeight: FontWeight.bold)),
+                        subtitle: Text(user.title),
+                        trailing: Text('${user.xp} XP', style: TextStyle(color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.bold)),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          )
+        ],
+      ),
     );
   }
 }
 
 // --- ВКЛАДКА ПРОФИЛЯ ---
-class ProfileTab extends StatelessWidget {
+class ProfileTab extends StatefulWidget {
   const ProfileTab({super.key});
+
+  @override
+  State<ProfileTab> createState() => _ProfileTabState();
+}
+
+class _ProfileTabState extends State<ProfileTab> {
+  late TextEditingController _nameCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    final controller = context.read<QuestController>();
+    _nameCtrl = TextEditingController(text: controller.username);
+  }
+
+  Future<void> _launchGitHub() async {
+    final Uri url = Uri.parse('https://github.com');
+    if (!await launchUrl(url, mode: LaunchMode.externalApplication)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Не удалось открыть ссылку')),
+        );
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final settings = context.watch<SettingsProvider>();
     final controller = context.watch<QuestController>();
-    final colorScheme = Theme.of(context).colorScheme;
 
-    return ListView(
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
-      children: [
-        Text(
-          settings.translate('Твой Профиль', 'Your Profile'),
-          style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w900, letterSpacing: -1),
-        ),
-        const SizedBox(height: 16),
-        Card(
-          color: colorScheme.primary.withValues(alpha: 0.05),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(28),
-            side: BorderSide(color: colorScheme.primary.withValues(alpha: 0.2)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Center(child: AvatarWidget(asset: controller.avatarAsset, radius: 45, fontSize: 40)),
+          const SizedBox(height: 12),
+          Center(child: Text(controller.profileTitle, style: const TextStyle(fontSize: 14, color: Colors.white54))),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _nameCtrl,
+            decoration: InputDecoration(labelText: settings.translate('Имя игрока', 'Player Name'), border: OutlineInputBorder(borderRadius: BorderRadius.circular(16))),
           ),
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    CircleAvatar(
-                      radius: 35,
-                      backgroundColor: colorScheme.primary,
-                      child: const Icon(Icons.person, size: 40, color: Colors.black),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+          const SizedBox(height: 16),
+          Text(settings.translate('Выбрать аватар:', 'Choose avatar:'), style: const TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 50,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              itemCount: availableAvatars.length,
+              itemBuilder: (context, idx) {
+                final av = availableAvatars[idx];
+                return GestureDetector(
+                  onTap: () => controller.updateProfile(newName: _nameCtrl.text, newAvatar: av, newTitle: controller.profileTitle),
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 4),
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(color: controller.avatarAsset == av ? Theme.of(context).colorScheme.primary.withOpacity(0.3) : Colors.white12, borderRadius: BorderRadius.circular(12)),
+                    child: Text(av, style: const TextStyle(fontSize: 24)),
+                  ),
+                );
+              },
+            ),
+          ),
+          const Divider(height: 32),
+          Text(settings.translate('Смена цветовой схемы:', 'Color Scheme:'), style: const TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            children: [
+              ChoiceChip(label: const Text('Cyber Green'), selected: settings.currentTheme == 'dark_cyber', onSelected: (_) => settings.setTheme('dark_cyber')),
+              ChoiceChip(label: const Text('Neon Blue'), selected: settings.currentTheme == 'dark_neon', onSelected: (_) => settings.setTheme('dark_neon')),
+              ChoiceChip(label: const Text('Sunset Pink'), selected: settings.currentTheme == 'dark_sunset', onSelected: (_) => settings.setTheme('dark_sunset')),
+              ChoiceChip(label: const Text('Chocolate'), selected: settings.currentTheme == 'dark_chocolate', onSelected: (_) => settings.setTheme('dark_chocolate')),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Text(settings.translate('Язык / Language:', 'Language:'), style: const TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              ElevatedButton(onPressed: () => settings.setLanguage('ru'), child: const Text('Русский')),
+              const SizedBox(width: 8),
+              ElevatedButton(onPressed: () => settings.setLanguage('en'), child: const Text('English')),
+            ],
+          ),
+          const SizedBox(height: 24),
+          FilledButton.icon(
+            onPressed: () => controller.updateProfile(newName: _nameCtrl.text, newAvatar: controller.avatarAsset, newTitle: controller.profileTitle),
+            icon: const Icon(Icons.save),
+            label: Text(settings.translate('Сохранить профиль', 'Save Profile')),
+          ),
+          const Divider(height: 40),
+          
+          Card(
+            color: Colors.white.withOpacity(0.03),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  Text(
+                    settings.translate('О приложении', 'About App'),
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '${settings.translate('Версия', 'Version')}: 1.5.0',
+                    style: const TextStyle(color: Colors.white60, fontSize: 14),
+                  ),
+                  const SizedBox(height: 12),
+                  InkWell(
+                    onTap: _launchGitHub,
+                    borderRadius: BorderRadius.circular(8),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          Text(controller.username, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-                          Text(controller.profileTitle, style: TextStyle(color: colorScheme.primary, fontWeight: FontWeight.w500)),
+                          Icon(Icons.code_rounded, size: 18, color: Theme.of(context).colorScheme.primary),
+                          const SizedBox(width: 8),
+                          Text(
+                            settings.translate('GitHub автора', 'Author\'s GitHub'),
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.primary,
+                              fontWeight: FontWeight.bold,
+                              decoration: TextDecoration.underline,
+                            ),
+                          ),
                         ],
                       ),
                     ),
-                    IconButton(
-                      onPressed: () => _showEditProfileDialog(context, controller, settings),
-                      icon: const Icon(Icons.edit_note_rounded),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 20),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: [
-                    _buildMiniStat('Level', controller.level.toString(), Icons.star_border_rounded),
-                    _buildMiniStat('XP', controller.xp.toString(), Icons.bolt_rounded),
-                    _buildMiniStat('Streak', controller.streak.toString(), Icons.local_fire_department_rounded),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 24),
-        Text(settings.translate('Настройки', 'App Settings'), style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 12),
-        Card(
-          child: Column(
-            children: [
-              ListTile(
-                leading: const Icon(Icons.language_rounded),
-                title: Text(settings.translate('Язык приложения', 'Language')),
-                trailing: Text(settings.currentLanguage == 'ru' ? 'РУ' : 'EN'),
-                onTap: () => settings.setLanguage(settings.currentLanguage == 'ru' ? 'en' : 'ru'),
-              ),
-              const Divider(height: 1, indent: 60),
-              ListTile(leading: const Icon(Icons.palette_rounded), title: Text(settings.translate('Тема интерфейса', 'UI Theme'))),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    _ThemeButton(label: 'Cyber', color: const Color(0xFF7CFFB2), isSelected: settings.currentTheme == 'dark_cyber', onTap: () => settings.setTheme('dark_cyber')),
-                    _ThemeButton(label: 'Sunset', color: const Color(0xFFFF6B9A), isSelected: settings.currentTheme == 'dark_sunset', onTap: () => settings.setTheme('dark_sunset')),
-                    _ThemeButton(label: 'Neon', color: const Color(0xFF00E5FF), isSelected: settings.currentTheme == 'dark_neon', onTap: () => settings.setTheme('dark_neon')),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-        
-        // --- БЛОК «О ПРИЛОЖЕНИИ» С ТВОИМ GITHUB (НОВОЕ!) ---
-        const SizedBox(height: 24),
-        Text(settings.translate('О приложении', 'About App'), style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 12),
-        Card(
-          child: Column(
-            children: [
-              ListTile(
-                leading: const Icon(Icons.info_outline_rounded),
-                title: Text(settings.translate('Версия', 'Version')),
-                trailing: const Text('1.0.0', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white60)),
-              ),
-              const Divider(height: 1, indent: 60),
-              ListTile(
-                leading: const Icon(Icons.code_rounded, color: Colors.purpleAccent),
-                title: Text(settings.translate('Разработчик (GitHub)', 'Developer (GitHub)')),
-                trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 16),
-                onTap: () => _showGitHubDialog(context, settings),
-              ),
-            ],
-          ),
-        ),
-        
-        const SizedBox(height: 12),
-        Card(
-          child: ListTile(
-            leading: const Icon(Icons.logout_rounded, color: Colors.redAccent),
-            title: Text(settings.translate('Выйти из аккаунта', 'Logout'), style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
-            onTap: () async => await FirebaseAuth.instance.signOut(),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildMiniStat(String label, String value, IconData icon) {
-    return Column(
-      children: [
-        Icon(icon, size: 20, color: Colors.white54),
-        const SizedBox(height: 4),
-        Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-        Text(label, style: const TextStyle(fontSize: 12, color: Colors.white54)),
-      ],
-    );
-  }
-
-  void _showEditProfileDialog(BuildContext context, QuestController controller, SettingsProvider settings) {
-    final nameController = TextEditingController(text: controller.username);
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(settings.translate('Изменить имя', 'Edit Name')),
-        content: TextField(controller: nameController, decoration: const InputDecoration(labelText: 'Никнейм')),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Отмена')),
-          FilledButton(
-            onPressed: () {
-              if (nameController.text.isNotEmpty) {
-                controller.updateProfile(newName: nameController.text, newAvatar: 'default', newTitle: controller.profileTitle);
-                Navigator.pop(context);
-              }
-            },
-            child: const Text('Сохранить'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // Окно для GitHub ссылки
-  void _showGitHubDialog(BuildContext context, SettingsProvider settings) {
-    const String url = 'https://github.com/korami4398-ctrl';
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Row(
-          children: [
-            const Icon(Icons.terminal_rounded, color: Colors.purpleAccent),
-            const SizedBox(width: 10),
-            Text(settings.translate('Профиль автора', 'Author\'s Profile')),
-          ],
-        ),
-        content: const Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Ссылка на проект и автора:', style: TextStyle(color: Colors.white70)),
-            SizedBox(height: 10),
-            SelectableText(
-              url,
-              style: TextStyle(color: Colors.blueAccent, fontWeight: FontWeight.bold, decoration: TextDecoration.underline),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Clipboard.setData(const ClipboardData(text: url));
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text(settings.translate('Ссылка скопирована!', 'Link copied!'))),
-              );
-              Navigator.pop(context);
-            },
-            child: Text(settings.translate('Скопировать', 'Copy Link')),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ThemeButton extends StatelessWidget {
-  final String label;
-  final Color color;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _ThemeButton({required this.label, required this.color, required this.isSelected, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-        decoration: BoxDecoration(
-          color: isSelected ? color.withValues(alpha: 0.15) : Colors.white.withValues(alpha: 0.03),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: isSelected ? color : Colors.white.withValues(alpha: 0.08), width: 2),
-        ),
-        child: Text(label, style: TextStyle(fontWeight: FontWeight.bold, color: isSelected ? color : Colors.white70)),
-      ),
-    );
-  }
-}
-
-// --- ЭКРАН АВТОРИЗАЦИИ ---
-class AuthScreen extends StatefulWidget {
-  const AuthScreen({super.key});
-
-  @override
-  State<AuthScreen> createState() => _AuthScreenState();
-}
-
-class _AuthScreenState extends State<AuthScreen> {
-  final _emailController = TextEditingController();
-  final _passwordController = TextEditingController();
-  final _usernameController = TextEditingController();
-  bool _isSignUp = false;
-  bool _isLoading = false;
-
-  @override
-  void dispose() {
-    _emailController.dispose();
-    _passwordController.dispose();
-    _usernameController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _submit() async {
-    final email = _emailController.text.trim();
-    final password = _passwordController.text.trim();
-    final username = _usernameController.text.trim();
-
-    if (email.isEmpty || password.isEmpty || (_isSignUp && username.isEmpty)) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Заполните все поля')));
-      return;
-    }
-
-    setState(() => _isLoading = true);
-
-    try {
-      if (_isSignUp) {
-        UserCredential userCredential = await FirebaseAuth.instance.createUserWithEmailAndPassword(email: email, password: password);
-        if (userCredential.user != null) {
-          await context.read<QuestController>().updateProfile(newName: username, newAvatar: 'default', newTitle: 'Новичок');
-        }
-      } else {
-        await FirebaseAuth.instance.signInWithEmailAndPassword(email: email, password: password);
-        await context.read<QuestController>().init();
-      }
-    } on FirebaseAuthException catch (e) {
-      String message = 'Произошла ошибка';
-      if (e.code == 'user-not-found') message = 'Пользователь не найден';
-      if (e.code == 'wrong-password') message = 'Неверный пароль';
-      if (e.code == 'email-already-in-use') message = 'Этот Email уже занят';
-      if (e.code == 'weak-password') message = 'Слишком слабый пароль (мин. 6 символов)';
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Card(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Text('VertUp', style: TextStyle(fontSize: 32, fontWeight: FontWeight.w900, letterSpacing: -1), textAlign: TextAlign.center),
-                  const SizedBox(height: 10),
-                  Text(_isSignUp ? 'Регистрация профиля' : 'Вход в систему', style: const TextStyle(fontSize: 18, color: Colors.white54), textAlign: TextAlign.center),
-                  const SizedBox(height: 24),
-                  if (_isSignUp) ...[
-                    TextField(controller: _usernameController, decoration: InputDecoration(labelText: 'Игровой никнейм', border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)))),
-                    const SizedBox(height: 12),
-                  ],
-                  TextField(controller: _emailController, keyboardType: TextInputType.emailAddress, decoration: InputDecoration(labelText: 'Email', border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)))),
-                  const SizedBox(height: 12),
-                  TextField(controller: _passwordController, obscureText: true, decoration: InputDecoration(labelText: 'Пароль', border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)))),
-                  const SizedBox(height: 20),
-                  _isLoading
-                      ? const Center(child: CircularProgressIndicator())
-                      : FilledButton(onPressed: _submit, child: Text(_isSignUp ? 'Создать аккаунт' : 'Войти')),
-                  const SizedBox(height: 12),
-                  TextButton(
-                    onPressed: () => setState(() => _isSignUp = !_isSignUp),
-                    child: Text(_isSignUp ? 'Уже есть аккаунт? Войти' : 'Нет аккаунта? Зарегистрироваться'),
                   ),
                 ],
               ),
             ),
           ),
-        ),
+        ],
       ),
     );
   }
