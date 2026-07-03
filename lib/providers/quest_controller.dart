@@ -1,9 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:govnolda/models/quest.dart';
-import 'package:govnolda/models/user_profile.dart'; // <--- Вот этот импорт критически важен!
+import 'package:govnolda/models/user_profile.dart';
 
 class QuestController extends ChangeNotifier {
   static const int xpPerLevel = 100;
@@ -11,6 +12,8 @@ class QuestController extends ChangeNotifier {
   SharedPreferences? _prefs;
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  
+  StreamSubscription<DocumentSnapshot>? _squadSubscription;
 
   bool _isLoading = true;
   int _xp = 0;
@@ -29,6 +32,13 @@ class QuestController extends ChangeNotifier {
   String _username = 'Игрок';
   String _avatarAsset = '🥷';
   String _profileTitle = 'Разрушитель реальности';
+
+  // --- ДИНАМИЧЕСКИЕ ПЕРЕМЕННЫЕ ДЛЯ КОМАНДНОГО ОГОНЬКА ---
+  String? _currentSquadId; // Теперь грузится из памяти или равен null, если соло
+  Map<String, dynamic> _squadMembers = {};
+  int _squadStreak = 0;
+  String _squadQuestTitle = "";
+  String _squadQuestDesc = "";
 
   final List<Quest> normalQuests = const [
     Quest(
@@ -74,7 +84,7 @@ class QuestController extends ChangeNotifier {
       id: 'hard_02',
       titleRu: 'Абсурдный режим героя',
       titleEn: 'Absurd Hero Mode',
-      descriptionRu: 'Снииви 30-секундное видео о том, почему сегодняшний день не будет NPC-днем.',
+      descriptionRu: 'Сними 30-секундное видео о том, почему сегодняшний день не будет NPC-днем.',
       descriptionEn: 'Record a 30-second video about why today will not be an NPC day.',
       xpReward: 40,
       isHardcore: true,
@@ -97,6 +107,13 @@ class QuestController extends ChangeNotifier {
   String get profileTitle => _profileTitle;
 
   bool get isOnline => _auth.currentUser != null;
+
+  // --- ГЕТТЕРЫ ДЛЯ КОМАНДНОГО ИНТЕРФЕЙСА ---
+  String? get currentSquadId => _currentSquadId;
+  Map<String, dynamic> get squadMembers => _squadMembers;
+  int get squadStreak => _squadStreak;
+  String get squadQuestTitle => _squadQuestTitle;
+  String get squadQuestDesc => _squadQuestDesc;
 
   Stream<List<UserProfile>> get onlineLeaderboard {
     return _firestore
@@ -142,12 +159,14 @@ class QuestController extends ChangeNotifier {
     _username = _prefs?.getString('username') ?? 'Игрок';
     _avatarAsset = _prefs?.getString('avatarAsset') ?? '🥷';
     _profileTitle = _prefs?.getString('profileTitle') ?? 'Выживший';
+    _currentSquadId = _prefs?.getString('currentSquadId'); // Подгружаем сохраненную комнату
 
     _loadCustomQuests();
     await _loadGlobalQuests();
 
     if (isOnline) {
       await _syncWithCloud();
+      listenToSquadUpdates(); 
     }
 
     final today = _dateKey(DateTime.now());
@@ -175,6 +194,170 @@ class QuestController extends ChangeNotifier {
 
     _isLoading = false;
     notifyListeners();
+  }
+
+  // --- ДИНАМИЧЕСКОЕ СОЗДАНИЕ НОВОГО СКВАДА ---
+  Future<String?> createSquad() async {
+    final user = _auth.currentUser;
+    if (user == null) return null;
+
+    // Генерируем красивый короткий ID: SQ-174829
+    final String newSquadId = 'SQ-${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}';
+    
+    await _firestore.collection('squads').doc(newSquadId).set({
+      'questTitle': todayNormalQuest.titleRu,
+      'questDesc': todayNormalQuest.descriptionRu,
+      'streak': 0,
+      'lastUpdateDate': '',
+      'members': {
+        user.uid: {
+          'name': _username,
+          'avatar': _avatarAsset,
+          'ready': false,
+        }
+      }
+    });
+
+    _currentSquadId = newSquadId;
+    await _prefs?.setString('currentSquadId', newSquadId);
+    listenToSquadUpdates();
+    return newSquadId;
+  }
+
+  // --- РАБОЧИЙ ВХОД В СУЩЕСТВУЮЩИЙ СКВАД ПО ID КОДУ ---
+  Future<bool> joinSquad(String squadId) async {
+    final user = _auth.currentUser;
+    if (user == null || squadId.trim().isEmpty) return false;
+
+    final docRef = _firestore.collection('squads').doc(squadId.trim());
+    
+    try {
+      bool success = false;
+      await _firestore.runTransaction((transaction) async {
+        final snapshot = await transaction.get(docRef);
+        if (!snapshot.exists) return;
+
+        Map<String, dynamic> members = Map<String, dynamic>.from(snapshot.data()!['members'] ?? {});
+        
+        members[user.uid] = {
+          'name': _username,
+          'avatar': _avatarAsset,
+          'ready': false,
+        };
+
+        transaction.update(docRef, {'members': members});
+        success = true;
+      });
+
+      if (success) {
+        _currentSquadId = squadId.trim();
+        await _prefs?.setString('currentSquadId', _currentSquadId!);
+        listenToSquadUpdates();
+        return true;
+      }
+    } catch (e) {
+      debugPrint("Ошибка подключения к скваду: $e");
+    }
+    return false;
+  }
+
+  // --- ПОЛНЫЙ ВЫХОД ИЗ ТЕКУЩЕЙ КОМАНДЫ ---
+  Future<void> leaveSquad() async {
+    final user = _auth.currentUser;
+    if (user == null || _currentSquadId == null) return;
+
+    _squadSubscription?.cancel();
+    final docRef = _firestore.collection('squads').doc(_currentSquadId);
+
+    try {
+      await _firestore.runTransaction((transaction) async {
+        final snapshot = await transaction.get(docRef);
+        if (!snapshot.exists) return;
+
+        Map<String, dynamic> members = Map<String, dynamic>.from(snapshot.data()!['members'] ?? {});
+        members.remove(user.uid);
+
+        if (members.isEmpty) {
+          transaction.delete(docRef); // Если никого нет — удаляем комнату
+        } else {
+          transaction.update(docRef, {'members': members});
+        }
+      });
+    } catch (e) {
+      debugPrint("Ошибка при выходе из группы: $e");
+    }
+
+    _currentSquadId = null;
+    _squadMembers = {};
+    _squadStreak = 0;
+    _squadQuestTitle = "";
+    _squadQuestDesc = "";
+    await _prefs?.remove('currentSquadId');
+    notifyListeners();
+  }
+
+  // --- СИНХРОНИЗАЦИЯ ОБНОВЛЕНИЙ ИЗ FIRESTORE ---
+  void listenToSquadUpdates() {
+    if (!isOnline || _currentSquadId == null) return;
+    _squadSubscription?.cancel();
+
+    _squadSubscription = _firestore
+        .collection('squads')
+        .doc(_currentSquadId)
+        .snapshots()
+        .listen((snapshot) {
+      if (snapshot.exists && snapshot.data() != null) {
+        final data = snapshot.data()!;
+        _squadStreak = data['streak'] ?? 0;
+        _squadQuestTitle = data['questTitle'] ?? "Общий контракт не выбран";
+        _squadQuestDesc = data['questDesc'] ?? "Ждем генерации лидером...";
+        _squadMembers = data['members'] ?? {};
+        notifyListeners(); 
+      }
+    });
+  }
+
+  // --- ОБНОВЛЕНИЕ СТАТУСА ВЫПОЛНЕНИЯ КВЕСТА ---
+  Future<void> completeSquadQuest() async {
+    final user = _auth.currentUser;
+    if (user == null || _currentSquadId == null || _currentSquadId!.isEmpty) return;
+
+    final todayStr = _dateKey(DateTime.now());
+    final docRef = _firestore.collection('squads').doc(_currentSquadId);
+
+    await _firestore.runTransaction((transaction) async {
+      final snapshot = await transaction.get(docRef);
+      if (!snapshot.exists) return;
+
+      final data = snapshot.data()!;
+      Map<String, dynamic> currentMembers = Map<String, dynamic>.from(data['members'] ?? {});
+      
+      if (currentMembers.containsKey(user.uid)) {
+        currentMembers[user.uid]['ready'] = true;
+        transaction.update(docRef, {'members': currentMembers});
+      }
+
+      bool allReady = true;
+      currentMembers.forEach((key, value) {
+        if (value['ready'] == false) allReady = false;
+      });
+
+      final String lastUpdateDate = data['lastUpdateDate'] ?? '';
+
+      if (allReady && lastUpdateDate != todayStr) {
+        int currentStreak = data['streak'] ?? 0;
+        transaction.update(docRef, {
+          'streak': currentStreak + 1,
+          'lastUpdateDate': todayStr,
+        });
+        
+        // Сбрасываем флаги готовности на следующий день
+        currentMembers.forEach((key, value) {
+          currentMembers[key]['ready'] = false;
+        });
+        transaction.update(docRef, {'members': currentMembers});
+      }
+    });
   }
 
   Future<void> _loadGlobalQuests() async {
@@ -251,6 +434,24 @@ class QuestController extends ChangeNotifier {
 
     if (isOnline) {
       await _updateCloudProfile();
+      // Если обновился профиль, то обновляем данные и в текущем скваде
+      if (_currentSquadId != null) {
+        final user = _auth.currentUser;
+        if (user != null) {
+          final docRef = _firestore.collection('squads').doc(_currentSquadId);
+          _firestore.runTransaction((transaction) async {
+            final snap = await transaction.get(docRef);
+            if (snap.exists) {
+              Map<String, dynamic> members = Map<String, dynamic>.from(snap.data()!['members'] ?? {});
+              if (members.containsKey(user.uid)) {
+                members[user.uid]['name'] = _username;
+                members[user.uid]['avatar'] = _avatarAsset;
+                transaction.update(docRef, {'members': members});
+              }
+            }
+          });
+        }
+      }
     }
   }
 
@@ -370,4 +571,10 @@ class QuestController extends ChangeNotifier {
   }
 
   String _dateKey(DateTime date) => '${date.year}-${date.month}-${date.day}';
+
+  @override
+  void dispose() {
+    _squadSubscription?.cancel();
+    super.dispose();
+  }
 }

@@ -94,7 +94,7 @@ class ProfileTab extends StatelessWidget {
           ListTile(
             leading: const Icon(Icons.info_outline_rounded),
             title: Text(settings.translate('Версия', 'Version')),
-            trailing: const Text('2.0.0', style: TextStyle(color: Colors.white30)),
+            trailing: const Text('2.1.0', style: TextStyle(color: Colors.white30)),
           ),
 // ...
         ],

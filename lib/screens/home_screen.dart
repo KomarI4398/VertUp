@@ -42,7 +42,6 @@ class VertUpHome extends StatefulWidget {
 
 class _VertUpHomeState extends State<VertUpHome> {
   int _selectedTab = 0;
-  // Добавляем контроллер для управления страницами
   late PageController _pageController;
 
   @override
@@ -81,13 +80,13 @@ class _VertUpHomeState extends State<VertUpHome> {
               ? const Center(child: CircularProgressIndicator())
               : PageView(
                   controller: _pageController,
-                  // Отключаем свайп пальцем, чтобы он не конфликтовал с элементами внутри вкладок
                   physics: const NeverScrollableScrollPhysics(), 
-                  children: const [
-                    QuestTab(),
-                    CreateQuestTab(),
-                    LeadersTab(),
-                    ProfileTab(),
+                  // МЫ УБРАЛИ КЛЮЧЕВОЕ СЛОВО const ОТСЮДА:
+                  children: [
+                    const QuestTab(),
+                    const CreateQuestTab(),
+                    LeadersTab(), // Теперь работает динамически без ошибок компиляции!
+                    const ProfileTab(),
                   ],
                 ),
         ),
@@ -97,7 +96,6 @@ class _VertUpHomeState extends State<VertUpHome> {
         height: 72,
         onDestinationSelected: (index) {
           setState(() => _selectedTab = index);
-          // Запускаем плавную анимацию перехода
           _pageController.animateToPage(
             index,
             duration: const Duration(milliseconds: 400),
