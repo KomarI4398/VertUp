@@ -1,9 +1,17 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     id("com.android.application")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
-    // Добавляем плагин Google Services вот сюда:
     id("com.google.gms.google-services")
+}
+
+// Загружаем настройки из файла key.properties
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("key.properties")
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
 android {
@@ -24,15 +32,25 @@ android {
         versionName = flutter.versionName
     }
 
-    // ТУТ БЫЛА ОШИБКА: закрывали блок android раньше времени или забывали закрыть его в конце
-    buildTypes {
-        release {
-            isMinifyEnabled = false  // Меняем true на false
-            isShrinkResources = false // Меняем true на false
-            signingConfig = signingConfigs.getByName("debug")
+    // Создаем конфигурацию подписи для релиза
+    signingConfigs {
+        create("release") {
+            keyAlias = keystoreProperties["keyAlias"] as String?
+            keyPassword = keystoreProperties["keyPassword"] as String?
+            storeFile = keystoreProperties["storeFile"]?.let { rootProject.file("app/$it") }
+            storePassword = keystoreProperties["storePassword"] as String?
         }
     }
-} // Вот эта скобка закрывает блок android
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            isShrinkResources = false
+            // Подключаем созданную релизную подпись вместо дебажной
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
+}
 
 kotlin {
     compilerOptions {
