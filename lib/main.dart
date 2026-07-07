@@ -5,6 +5,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'providers/quest_controller.dart';
 import 'providers/settings_provider.dart';
 import 'screens/home_screen.dart';
+import 'screens/auth_screen.dart'; // Импортируем наш экран авторизации
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -79,22 +80,18 @@ class VertUpApp extends StatelessWidget {
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snapshot) {
+          // Пока Firebase проверяет сохраненную сессию, крутим лоадер
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Scaffold(body: Center(child: CircularProgressIndicator()));
           }
+          
+          // Если токен найден и юзер авторизован — пускаем в приложение
           if (snapshot.hasData) {
             return const VertUpHome();
           }
-          return Scaffold(
-            body: Center(
-              child: ElevatedButton(
-                onPressed: () async {
-                  await FirebaseAuth.instance.signInAnonymously();
-                },
-                child: const Text("Войти анонимно (Тест)"),
-              ),
-            ),
-          );
+          
+          // Если токена нет (первый заход или логаут) — открываем экран входа/регистрации
+          return const AuthScreen(); 
         },
       ),
     );

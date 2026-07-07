@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -25,16 +26,18 @@ class QuestController extends ChangeNotifier {
   String? _hardcoreQuestId;
   String? _completedQuestTextRu;
   String? _completedQuestTextEn;
+  String? _todayNormalQuestId;
 
   List<Quest> _customQuests = [];
   List<Quest> _globalQuests = [];
 
+  // Жесткие базовые дефолты
   String _username = 'Игрок';
   String _avatarAsset = '🥷';
   String _profileTitle = 'Разрушитель реальности';
 
   // --- ДИНАМИЧЕСКИЕ ПЕРЕМЕННЫЕ ДЛЯ КОМАНДНОГО ОГОНЬКА ---
-  String? _currentSquadId; // Теперь грузится из памяти или равен null, если соло
+  String? _currentSquadId; 
   Map<String, dynamic> _squadMembers = {};
   int _squadStreak = 0;
   String _squadQuestTitle = "";
@@ -108,7 +111,6 @@ class QuestController extends ChangeNotifier {
 
   bool get isOnline => _auth.currentUser != null;
 
-  // --- ГЕТТЕРЫ ДЛЯ КОМАНДНОГО ИНТЕРФЕЙСА ---
   String? get currentSquadId => _currentSquadId;
   Map<String, dynamic> get squadMembers => _squadMembers;
   int get squadStreak => _squadStreak;
@@ -135,10 +137,11 @@ class QuestController extends ChangeNotifier {
     final pool = _customQuests.isNotEmpty 
         ? _customQuests 
         : (_globalQuests.isNotEmpty ? _globalQuests : normalQuests);
-    final now = DateTime.now();
-    final daySeed = DateTime(now.year, now.month, now.day).millisecondsSinceEpoch ~/ Duration.millisecondsPerDay;
-    final index = daySeed % pool.length;
-    return pool[index];
+    
+    return pool.firstWhere(
+      (q) => q.id == _todayNormalQuestId,
+      orElse: () => pool.first,
+    );
   }
 
   Quest get currentQuest {
@@ -156,10 +159,14 @@ class QuestController extends ChangeNotifier {
     _xp = _prefs?.getInt('xp') ?? 0;
     _streak = _prefs?.getInt('streak') ?? 0;
     _lastCompletedDate = _prefs?.getString('lastCompletedDate');
-    _username = _prefs?.getString('username') ?? 'Игрок';
-    _avatarAsset = _prefs?.getString('avatarAsset') ?? '🥷';
-    _profileTitle = _prefs?.getString('profileTitle') ?? 'Выживший';
-    _currentSquadId = _prefs?.getString('currentSquadId'); // Подгружаем сохраненную комнату
+    
+    // Подгружаем кэш, если его нет — сохраняем дефолтные значения
+    _username = _prefs?.getString('username') ?? _username;
+    _avatarAsset = _prefs?.getString('avatarAsset') ?? _avatarAsset;
+    _profileTitle = _prefs?.getString('profileTitle') ?? _profileTitle;
+    
+    _currentSquadId = _prefs?.getString('currentSquadId');
+    _todayNormalQuestId = _prefs?.getString('todayNormalQuestId');
 
     _loadCustomQuests();
     await _loadGlobalQuests();
@@ -196,12 +203,10 @@ class QuestController extends ChangeNotifier {
     notifyListeners();
   }
 
-  // --- ДИНАМИЧЕСКОЕ СОЗДАНИЕ НОВОГО СКВАДА ---
   Future<String?> createSquad() async {
     final user = _auth.currentUser;
     if (user == null) return null;
 
-    // Генерируем красивый короткий ID: SQ-174829
     final String newSquadId = 'SQ-${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}';
     
     await _firestore.collection('squads').doc(newSquadId).set({
@@ -224,7 +229,6 @@ class QuestController extends ChangeNotifier {
     return newSquadId;
   }
 
-  // --- РАБОЧИЙ ВХОД В СУЩЕСТВУЮЩИЙ СКВАД ПО ID КОДУ ---
   Future<bool> joinSquad(String squadId) async {
     final user = _auth.currentUser;
     if (user == null || squadId.trim().isEmpty) return false;
@@ -261,7 +265,6 @@ class QuestController extends ChangeNotifier {
     return false;
   }
 
-  // --- ПОЛНЫЙ ВЫХОД ИЗ ТЕКУЩЕЙ КОМАНДЫ ---
   Future<void> leaveSquad() async {
     final user = _auth.currentUser;
     if (user == null || _currentSquadId == null) return;
@@ -278,7 +281,7 @@ class QuestController extends ChangeNotifier {
         members.remove(user.uid);
 
         if (members.isEmpty) {
-          transaction.delete(docRef); // Если никого нет — удаляем комнату
+          transaction.delete(docRef); 
         } else {
           transaction.update(docRef, {'members': members});
         }
@@ -296,7 +299,6 @@ class QuestController extends ChangeNotifier {
     notifyListeners();
   }
 
-  // --- СИНХРОНИЗАЦИЯ ОБНОВЛЕНИЙ ИЗ FIRESTORE ---
   void listenToSquadUpdates() {
     if (!isOnline || _currentSquadId == null) return;
     _squadSubscription?.cancel();
@@ -317,7 +319,6 @@ class QuestController extends ChangeNotifier {
     });
   }
 
-  // --- ОБНОВЛЕНИЕ СТАТУСА ВЫПОЛНЕНИЯ КВЕСТА ---
   Future<void> completeSquadQuest() async {
     final user = _auth.currentUser;
     if (user == null || _currentSquadId == null || _currentSquadId!.isEmpty) return;
@@ -351,7 +352,6 @@ class QuestController extends ChangeNotifier {
           'lastUpdateDate': todayStr,
         });
         
-        // Сбрасываем флаги готовности на следующий день
         currentMembers.forEach((key, value) {
           currentMembers[key]['ready'] = false;
         });
@@ -404,21 +404,31 @@ class QuestController extends ChangeNotifier {
     }
   }
 
+  // Усиленный метод синхронизации для предотвращения сброса аватаров
   Future<void> _syncWithCloud() async {
     final user = _auth.currentUser;
     if (user == null) return;
 
-    final doc = await _firestore.collection('users').doc(user.uid).get();
-    if (doc.exists) {
-      final data = doc.data()!;
-      _xp = data['xp'] ?? _xp;
-      _streak = data['streak'] ?? _streak;
-      _username = data['username'] ?? _username;
-      _avatarAsset = data['avatarAsset'] ?? _avatarAsset;
-      _profileTitle = data['title'] ?? _profileTitle;
-      await _saveAll();
-    } else {
-      await _updateCloudProfile();
+    try {
+      final doc = await _firestore.collection('users').doc(user.uid).get();
+      if (doc.exists && doc.data() != null) {
+        final data = doc.data()!;
+        _xp = data['xp'] ?? _xp;
+        _streak = data['streak'] ?? _streak;
+        
+        // Скачиваем данные из Firestore, но если там null — оставляем локальные дефолтные
+        _username = data['username'] ?? _username;
+        _avatarAsset = data['avatarAsset'] ?? _avatarAsset;
+        _profileTitle = data['title'] ?? _profileTitle;
+        
+        await _saveAll();
+        notifyListeners(); // Принудительно заставляем интерфейс обновиться
+      } else {
+        // Если документа еще не было в облаке, выгружаем туда дефолтные значения
+        await _updateCloudProfile();
+      }
+    } catch (e) {
+      debugPrint("Ошибка синхронизации с облаком: $e");
     }
   }
 
@@ -434,7 +444,6 @@ class QuestController extends ChangeNotifier {
 
     if (isOnline) {
       await _updateCloudProfile();
-      // Если обновился профиль, то обновляем данные и в текущем скваде
       if (_currentSquadId != null) {
         final user = _auth.currentUser;
         if (user != null) {
@@ -499,7 +508,7 @@ class QuestController extends ChangeNotifier {
 
   Future<void> usePanicButton() async {
     if (!_questRevealed || _questCompleted || _panicUsed) return;
-    final index = DateTime.now().second % hardcoreQuests.length;
+    final index = Random().nextInt(hardcoreQuests.length);
     _hardcoreQuestId = hardcoreQuests[index].id;
     _panicUsed = true;
     await _prefs?.setString('hardcoreQuestId', _hardcoreQuestId!);
@@ -533,15 +542,37 @@ class QuestController extends ChangeNotifier {
   }
 
   Future<void> _startFreshDay(String today) async {
+    final String? yesterdayQuestId = _todayNormalQuestId;
+
     _questRevealed = false;
     _questCompleted = false;
     _panicUsed = false;
     _hardcoreQuestId = null;
+
+    final pool = _customQuests.isNotEmpty 
+        ? _customQuests 
+        : (_globalQuests.isNotEmpty ? _globalQuests : normalQuests);
+
+    List<Quest> availableQuests = pool.where((q) => q.id != yesterdayQuestId).toList();
+    if (availableQuests.isEmpty) {
+      availableQuests = pool;
+    }
+
+    final nextQuest = availableQuests[Random().nextInt(availableQuests.length)];
+    _todayNormalQuestId = nextQuest.id;
+
+    await _prefs?.setString('todayNormalQuestId', _todayNormalQuestId!);
     await _prefs?.setString('statusDate', today);
     await _prefs?.setBool('questRevealed', false);
     await _prefs?.setBool('questCompleted', false);
     await _prefs?.setBool('panicUsed', false);
     await _prefs?.remove('hardcoreQuestId');
+
+    if (isOnline) {
+      await _firestore.collection('users').doc(_auth.currentUser!.uid).set({
+        'current_quest_id': _todayNormalQuestId,
+      }, SetOptions(merge: true));
+    }
   }
 
   Future<void> _saveAll() async {
@@ -554,6 +585,9 @@ class QuestController extends ChangeNotifier {
     await _prefs?.setString('username', _username);
     await _prefs?.setString('avatarAsset', _avatarAsset);
     await _prefs?.setString('profileTitle', _profileTitle);
+    if (_todayNormalQuestId != null) {
+      await _prefs?.setString('todayNormalQuestId', _todayNormalQuestId!);
+    }
   }
 
   Future<void> _updateCloudProfile() async {
